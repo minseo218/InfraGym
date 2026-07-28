@@ -48,19 +48,24 @@ Requires Docker Desktop or another Docker Compose-compatible runtime.
 ```bash
 cp .env.example .env.local
 docker compose up --build -d
-npm install
-npm run dev
 ```
 
 Services:
 
-- InfraGym UI: local URL printed by the frontend
+- InfraGym UI: `http://localhost:3000`
 - FastAPI and API docs: `http://localhost:8000/docs`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3002`
 - Loki: `http://localhost:3100/ready`
 
-SQLite data is stored in the `infragym-data` Docker volume.
+SQLite, Prometheus, Loki, and Grafana data are stored in named Docker volumes.
+
+Run the full black-box stack verification, including bounded concurrent load,
+backend restart/crash recovery, and SQLite persistence:
+
+```bash
+python3 scripts/verify-docker-stack.py --load --restart-backend --crash-backend
+```
 
 Stop the stack without deleting saved training sessions:
 
@@ -90,11 +95,8 @@ npm test
 Backend:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
-cd backend
-pytest
+docker build --target test -t infragym-backend-test backend
+docker run --rm infragym-backend-test
 ```
 
 ## Phase 1 API
