@@ -19,7 +19,9 @@ Phase 1 implements one complete learning loop before adding more systems:
 - evidence-gated mitigation and recovery
 - root-cause, mitigation, and prevention debrief
 - persistent 100-point assessment with MTTR
-- Prometheus metrics plus provisioned Grafana and Loki services
+- RED and training-domain Prometheus metrics with bounded-cardinality labels
+- structured JSON application logs collected by Grafana Alloy into Loki
+- provisioned Grafana incident dashboard, 99.9% availability SLO, and alert rules
 - responsive desktop and mobile workspace
 
 The virtual terminal never runs commands on the host machine or a real cluster.
@@ -37,7 +39,7 @@ React workspace
     └── API unavailable → safe in-browser demo engine
 
 Prometheus ──┐
-Loki ────────┼── Grafana
+Alloy → Loki ┼── Grafana
 FastAPI ─────┘
 ```
 
@@ -57,6 +59,7 @@ Services:
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3002`
 - Loki: `http://localhost:3100/ready`
+- Grafana Alloy: `http://localhost:12345`
 
 SQLite, Prometheus, Loki, and Grafana data are stored in named Docker volumes.
 
@@ -66,6 +69,28 @@ backend restart/crash recovery, and SQLite persistence:
 ```bash
 python3 scripts/verify-docker-stack.py --load --restart-backend --crash-backend
 ```
+
+Run the complete observability verification. This generates a stage-3 incident,
+checks Prometheus metrics and rules, waits for all three scenario alerts to fire,
+queries the structured backend logs from Loki, verifies the provisioned Grafana
+dashboard and datasources, then confirms recovery telemetry:
+
+```bash
+python3 scripts/verify-observability.py --wait-for-alerts
+```
+
+The default Grafana home dashboard is **InfraGym Incident Operations**. Its
+panels cover logical incident state, RPS, p95 latency, 5xx ratio, database-pool
+utilization, retry amplification, real API RED metrics, persistent training
+state, scrape health, active alerts, and backend logs.
+
+See [docs/observability.md](docs/observability.md) for the metric catalog,
+logical-versus-real signal model, SLO definitions, alert thresholds, LogQL
+examples, and verification runbook.
+
+Prometheus retains seven days of metrics. Loki retains seven days of logs.
+Docker JSON logs rotate at 10 MiB with three files per service, keeping the
+local Mac mini footprint bounded.
 
 Stop the stack without deleting saved training sessions:
 

@@ -1,0 +1,62 @@
+rule_files:
+  - ../rules/infragym.yml
+
+evaluation_interval: 5s
+
+tests:
+  - interval: 5s
+    input_series:
+      - series: infragym_scenario_p95_latency_seconds{scenario="ticketing-traffic-spike"}
+        values: "1+0x12"
+      - series: infragym_scenario_error_ratio{scenario="ticketing-traffic-spike"}
+        values: "0.128+0x12"
+      - series: infragym_scenario_db_pool_utilization_ratio{scenario="ticketing-traffic-spike"}
+        values: "1+0x12"
+    alert_rule_test:
+      - eval_time: 35s
+        alertname: InfraGymScenarioLatencySLOBreach
+        exp_alerts:
+          - exp_labels:
+              alertname: InfraGymScenarioLatencySLOBreach
+              scenario: ticketing-traffic-spike
+              severity: critical
+              service: ticketing
+            exp_annotations:
+              summary: Ticketing scenario p95 latency exceeds 500 ms
+              description: The logical incident signal has breached the training latency SLO.
+              runbook_url: http://localhost:3002/d/infragym-incident-ops
+      - eval_time: 35s
+        alertname: InfraGymScenarioErrorBudgetBurn
+        exp_alerts:
+          - exp_labels:
+              alertname: InfraGymScenarioErrorBudgetBurn
+              scenario: ticketing-traffic-spike
+              severity: critical
+              service: ticketing
+            exp_annotations:
+              summary: Ticketing scenario is burning error budget rapidly
+              description: The logical 5xx ratio is consuming the 99.9% availability error budget above 14.4x.
+              runbook_url: http://localhost:3002/d/infragym-incident-ops
+      - eval_time: 35s
+        alertname: InfraGymDatabasePoolSaturated
+        exp_alerts:
+          - exp_labels:
+              alertname: InfraGymDatabasePoolSaturated
+              scenario: ticketing-traffic-spike
+              severity: warning
+              service: ticketing-database
+            exp_annotations:
+              summary: Ticketing database connection pool is saturated
+              description: The logical database pool has remained at or above 95% utilization.
+              runbook_url: http://localhost:3002/d/infragym-incident-ops
+
+  - interval: 5s
+    input_series:
+      - series: 'infragym_http_requests_total{method="GET",route="/health",status_code="200"}'
+        values: "0+10x60"
+    promql_expr_test:
+      - expr: infragym:http_error_ratio5m
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="infragym:http_error_ratio5m"}'
+            value: 0

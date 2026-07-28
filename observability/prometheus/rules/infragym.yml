@@ -1,0 +1,75 @@
+groups:
+  - name: infragym-sli-recording
+    interval: 5s
+    rules:
+      - record: infragym:http_request_rate5m
+        expr: sum(rate(infragym_http_requests_total[5m]))
+
+      - record: infragym:http_error_ratio5m
+        expr: |
+          (
+            sum(rate(infragym_http_requests_total{status_code=~"5.."}[5m]))
+            or vector(0)
+          )
+          /
+          clamp_min(sum(rate(infragym_http_requests_total[5m])), 0.000001)
+
+      - record: infragym:http_availability_ratio5m
+        expr: 1 - infragym:http_error_ratio5m
+
+      - record: infragym:http_p95_latency_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(infragym_http_request_duration_seconds_bucket[5m]))
+          )
+
+      - record: infragym:error_budget_burn_rate5m
+        expr: infragym:http_error_ratio5m / 0.001
+
+  - name: infragym-alerts
+    interval: 5s
+    rules:
+      - alert: InfraGymAPIDown
+        expr: up{job="infragym-api"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: infragym-api
+        annotations:
+          summary: InfraGym API is unavailable
+          description: Prometheus has failed to scrape the InfraGym API for 30 seconds.
+          runbook_url: http://localhost:3002/d/infragym-incident-ops
+
+      - alert: InfraGymScenarioLatencySLOBreach
+        expr: infragym_scenario_p95_latency_seconds > 0.5
+        for: 30s
+        labels:
+          severity: critical
+          service: ticketing
+        annotations:
+          summary: Ticketing scenario p95 latency exceeds 500 ms
+          description: The logical incident signal has breached the training latency SLO.
+          runbook_url: http://localhost:3002/d/infragym-incident-ops
+
+      - alert: InfraGymScenarioErrorBudgetBurn
+        expr: infragym_scenario_error_ratio / 0.001 > 14.4
+        for: 30s
+        labels:
+          severity: critical
+          service: ticketing
+        annotations:
+          summary: Ticketing scenario is burning error budget rapidly
+          description: The logical 5xx ratio is consuming the 99.9% availability error budget above 14.4x.
+          runbook_url: http://localhost:3002/d/infragym-incident-ops
+
+      - alert: InfraGymDatabasePoolSaturated
+        expr: infragym_scenario_db_pool_utilization_ratio >= 0.95
+        for: 30s
+        labels:
+          severity: warning
+          service: ticketing-database
+        annotations:
+          summary: Ticketing database connection pool is saturated
+          description: The logical database pool has remained at or above 95% utilization.
+          runbook_url: http://localhost:3002/d/infragym-incident-ops

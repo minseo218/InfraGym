@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   frontend:
     build:
@@ -12,6 +18,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    labels:
+      infragym_observability: "true"
     healthcheck:
       test:
         [
@@ -24,6 +32,7 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   backend:
     build:
@@ -34,21 +43,30 @@ services:
       - "8000:8000"
     volumes:
       - infragym-data:/data
+    labels:
+      infragym_observability: "true"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   prometheus:
     image: prom/prometheus:v2.54.1
-    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
     ports:
       - "9090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
+    labels:
+      infragym_observability: "true"
     depends_on:
       backend:
         condition: service_healthy
@@ -58,6 +76,7 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   loki:
     image: grafana/loki:3.2.1
@@ -67,6 +86,8 @@ services:
     volumes:
       - ./observability/loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
+    labels:
+      infragym_observability: "true"
     healthcheck:
       test:
         [
@@ -82,6 +103,33 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    logging: *default-logging
+
+  alloy:
+    image: grafana/alloy:v1.18.0
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    labels:
+      infragym_observability: "true"
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/alloy", "validate", "/etc/alloy/config.alloy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
 
   grafana:
     image: grafana/grafana:11.3.0
@@ -89,11 +137,17 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/infragym-incident-operations.json
     ports:
       - "3002:3000"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
+    labels:
+      infragym_observability: "true"
     depends_on:
       prometheus:
         condition: service_healthy
@@ -105,9 +159,11 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   infragym-data:
   prometheus-data:
   loki-data:
+  alloy-data:
   grafana-data:

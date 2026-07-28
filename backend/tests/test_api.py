@@ -1,4 +1,6 @@
 import importlib
+import json
+import logging
 import os
 
 from fastapi.testclient import TestClient
@@ -61,6 +63,49 @@ def test_mitigation_requires_evidence(tmp_path):
 
 def test_metrics_endpoint(tmp_path):
     with build_client(tmp_path) as client:
+        session_id = client.post("/api/v1/sessions").json()["id"]
+        client.post(f"/api/v1/sessions/{session_id}/advance")
+        client.post(
+            f"/api/v1/sessions/{session_id}/commands",
+            json={"command": "kubectl top pods"},
+        )
         response = client.get("/metrics")
         assert response.status_code == 200
         assert "infragym_http_requests_total" in response.text
+        assert 'route="/api/v1/sessions"' in response.text
+        assert 'status_code="201"' in response.text
+        assert (
+            'infragym_scenario_stage{scenario="ticketing-traffic-spike"} 2.0'
+            in response.text
+        )
+        assert (
+            'infragym_scenario_db_pool_utilization_ratio'
+            '{scenario="ticketing-traffic-spike"} 1.0'
+            in response.text
+        )
+        assert 'infragym_commands_total{evidence_type="metrics"}' in response.text
+        assert "infragym_http_request_duration_seconds_bucket" in response.text
+        assert "infragym_persisted_sessions{status=\"active\"} 1.0" in response.text
+
+
+def test_application_logs_are_structured_json():
+    from app.observability import JsonFormatter
+
+    record = logging.LogRecord(
+        name="infragym",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="scenario_started",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "scenario_started"
+    record.fields = {"session_id": "session-123", "stage": 1}
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert payload["service"] == "infragym-scenario-engine"
+    assert payload["event"] == "scenario_started"
+    assert payload["session_id"] == "session-123"
+    assert payload["stage"] == 1

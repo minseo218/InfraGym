@@ -28,4 +28,4 @@ ENV INFRAGYM_DB_PATH=/data/infragym.db
 
 USER infragym
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

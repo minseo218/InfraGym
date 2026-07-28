@@ -1,38 +1,52 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .database import connection, evidence_from_row, init_database
+from .observability import (
+    COMMANDS,
+    FINAL_SCORE,
+    HTTP_DURATION,
+    HTTP_IN_FLIGHT,
+    HTTP_REQUESTS,
+    MITIGATIONS,
+    MTTR,
+    SCENARIO,
+    SESSIONS_COMPLETED,
+    SESSIONS_CREATED,
+    configure_logger,
+    log_event,
+    render_metrics,
+    update_persisted_counts,
+    update_scenario_signals,
+)
 from .scenario import execute_command, grade_debrief, investigation_score, normalize_command
 
-logger = logging.getLogger("infragym")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-
-REQUESTS = 0
-COMMANDS = 0
-STARTED_AT = time.monotonic()
+logger = configure_logger()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_database()
+    refresh_observability()
+    log_event(logger, "service_started", version="0.3.0")
     yield
+    log_event(logger, "service_stopped")
 
 
 app = FastAPI(
     title="InfraGym Scenario Engine",
-    version="0.2.0",
-    description="Persistent Phase 1 scenario engine for InfraGym.",
+    version="0.3.0",
+    description="Observable, persistent Phase 1 scenario engine for InfraGym.",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -82,17 +96,62 @@ def require_session(session_id: str):
     return row
 
 
+def refresh_observability() -> None:
+    with connection() as conn:
+        counts = {
+            row["status"]: row["count"]
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS count FROM sessions GROUP BY status"
+            ).fetchall()
+        }
+        command_count = conn.execute("SELECT COUNT(*) FROM command_history").fetchone()[0]
+        latest = conn.execute(
+            "SELECT stage FROM sessions ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+    update_persisted_counts(counts, command_count)
+    update_scenario_signals(int(latest["stage"]) if latest else 0)
+
+
 @app.middleware("http")
-async def count_requests(request, call_next):
-    global REQUESTS
-    REQUESTS += 1
-    response = await call_next(request)
-    return response
+async def observe_requests(request: Request, call_next):
+    method = request.method
+    started = time.perf_counter()
+    status_code = 500
+    HTTP_IN_FLIGHT.labels(method).inc()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    except Exception:
+        log_event(
+            logger,
+            "http_request_failed",
+            method=method,
+            path=request.url.path,
+            status_code=500,
+            exc_info=True,
+        )
+        raise
+    finally:
+        duration = time.perf_counter() - started
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        HTTP_IN_FLIGHT.labels(method).dec()
+        HTTP_REQUESTS.labels(method, route, str(status_code)).inc()
+        HTTP_DURATION.labels(method, route).observe(duration)
+        if request.url.path.startswith("/api/") or status_code >= 400:
+            log_event(
+                logger,
+                "http_request_completed",
+                method=method,
+                route=route,
+                status_code=status_code,
+                duration_ms=round(duration * 1000, 3),
+            )
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": "infragym-scenario-engine", "version": "0.2.0"}
+    return {"status": "ok", "service": "infragym-scenario-engine", "version": "0.3.0"}
 
 
 @app.post("/api/v1/sessions", status_code=201)
@@ -108,7 +167,9 @@ def create_session() -> dict:
             (session_id, started_at),
         )
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
-    logger.info("scenario_started session_id=%s scenario=ticketing-traffic-spike", session_id)
+    SESSIONS_CREATED.labels(SCENARIO).inc()
+    refresh_observability()
+    log_event(logger, "scenario_started", session_id=session_id, scenario=SCENARIO, stage=1)
     return serialize_session(row)
 
 
@@ -126,13 +187,13 @@ def advance_session(session_id: str) -> dict:
     with connection() as conn:
         conn.execute("UPDATE sessions SET stage = ? WHERE id = ?", (next_stage, session_id))
         updated = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
-    logger.info("scenario_advanced session_id=%s stage=%s", session_id, next_stage)
+    refresh_observability()
+    log_event(logger, "scenario_advanced", session_id=session_id, stage=next_stage)
     return serialize_session(updated)
 
 
 @app.post("/api/v1/sessions/{session_id}/commands")
 def run_command(session_id: str, payload: CommandRequest) -> dict:
-    global COMMANDS
     row = require_session(session_id)
     normalized = normalize_command(payload.command)
     result = execute_command(normalized)
@@ -153,12 +214,16 @@ def run_command(session_id: str, payload: CommandRequest) -> dict:
             "UPDATE sessions SET evidence = ?, score = ? WHERE id = ?",
             (json.dumps(evidence), score, session_id),
         )
-    COMMANDS += 1
-    logger.info(
-        "command_executed session_id=%s command=%r evidence=%s",
-        session_id,
-        normalized,
-        result.evidence,
+    evidence_type = result.evidence or "none"
+    COMMANDS.labels(evidence_type).inc()
+    refresh_observability()
+    log_event(
+        logger,
+        "command_executed",
+        session_id=session_id,
+        command=normalized,
+        evidence_type=evidence_type,
+        supported=result.evidence is not None or normalized == "help",
     )
     return {
         "command": normalized,
@@ -173,6 +238,13 @@ def mitigate(session_id: str) -> dict:
     row = require_session(session_id)
     evidence = evidence_from_row(row)
     if len(evidence) < 3:
+        MITIGATIONS.labels("rejected").inc()
+        log_event(
+            logger,
+            "mitigation_rejected",
+            session_id=session_id,
+            evidence_count=len(evidence),
+        )
         raise HTTPException(status_code=409, detail="Collect at least three evidence types first")
     score = investigation_score(evidence, recovered=True)
     with connection() as conn:
@@ -181,7 +253,9 @@ def mitigate(session_id: str) -> dict:
             (score, session_id),
         )
         updated = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
-    logger.info("mitigation_applied session_id=%s score=%s", session_id, score)
+    MITIGATIONS.labels("accepted").inc()
+    refresh_observability()
+    log_event(logger, "mitigation_applied", session_id=session_id, score=score, stage=4)
     return {
         **serialize_session(updated),
         "output": (
@@ -234,7 +308,17 @@ def complete_session(session_id: str, payload: DebriefRequest) -> dict:
                 session_id,
             ),
         )
-    logger.info("scenario_completed session_id=%s score=%s mttr=%s", session_id, final_score, mttr_seconds)
+    SESSIONS_COMPLETED.labels(SCENARIO).inc()
+    FINAL_SCORE.labels(SCENARIO).observe(final_score)
+    MTTR.labels(SCENARIO).observe(mttr_seconds)
+    refresh_observability()
+    log_event(
+        logger,
+        "scenario_completed",
+        session_id=session_id,
+        score=final_score,
+        mttr_seconds=mttr_seconds,
+    )
     return report
 
 
@@ -248,16 +332,6 @@ def get_report(session_id: str) -> dict:
 
 @app.get("/metrics")
 def metrics() -> Response:
-    uptime = time.monotonic() - STARTED_AT
-    payload = (
-        "# HELP infragym_http_requests_total Total HTTP requests.\n"
-        "# TYPE infragym_http_requests_total counter\n"
-        f"infragym_http_requests_total {REQUESTS}\n"
-        "# HELP infragym_commands_total Total virtual terminal commands.\n"
-        "# TYPE infragym_commands_total counter\n"
-        f"infragym_commands_total {COMMANDS}\n"
-        "# HELP infragym_process_uptime_seconds Scenario engine uptime.\n"
-        "# TYPE infragym_process_uptime_seconds gauge\n"
-        f"infragym_process_uptime_seconds {uptime:.3f}\n"
-    )
-    return Response(content=payload, media_type="text/plain; version=0.0.4")
+    refresh_observability()
+    payload, content_type = render_metrics()
+    return Response(content=payload, media_type=content_type)
