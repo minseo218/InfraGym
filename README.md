@@ -92,6 +92,13 @@ Frontend:
 npm test
 ```
 
+Browser E2E (starts/reuses the Docker Compose stack):
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
 Backend:
 
 ```bash

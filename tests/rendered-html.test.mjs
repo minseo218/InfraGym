@@ -21,4 +21,5 @@ test("server-renders the InfraGym training workspace", async () => {
   assert.match(html, /Virtual terminal/);
   assert.match(html, /MVP LEARNING PATH/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
+  assert.doesNotMatch(html, /\.vinext\/fonts|file:\/\/|\/Users\//i);
 });

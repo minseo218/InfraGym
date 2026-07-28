@@ -3,8 +3,8 @@
 :root {
   --ink:#07110f;--panel:#0b1714;--panel2:#0f1e1a;--line:#20342e;--soft:rgba(137,170,157,.13);
   --text:#f0f4eb;--muted:#81968e;--green:#10d889;--green-soft:rgba(16,216,137,.12);
-  --amber:#ffbe55;--coral:#ff5d4a;--cream:#e9e6d9;--sans:var(--font-geist-sans),Arial,sans-serif;
-  --mono:var(--font-geist-mono),monospace;
+  --amber:#ffbe55;--coral:#ff5d4a;--cream:#e9e6d9;--sans:Inter,"SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+  --mono:"SFMono-Regular","Cascadia Code","Roboto Mono",Consolas,monospace;
 }
 *{box-sizing:border-box}html{scroll-behavior:smooth;background:var(--ink)}
 body{margin:0;background:radial-gradient(circle at 75% 3%,rgba(16,216,137,.08),transparent 24rem),var(--ink);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}

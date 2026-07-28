@@ -265,7 +265,16 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span>InfraGym</span>
         </a>
-        <div className="topbar-center"><span className="status-dot" />{engineMode === "server" ? "Persistent engine online" : engineMode === "connecting" ? "Connecting scenario engine" : "Demo engine ready"}<span className="topbar-divider" /><span className="mono">{engineMode === "server" ? "FASTAPI · SQLITE" : "SAFE FALLBACK"}</span></div>
+        <div className="topbar-center">
+          <span className="status-dot" />
+          <span data-testid="engine-status">
+            {engineMode === "server" ? "Persistent engine online" : engineMode === "connecting" ? "Connecting scenario engine" : "Demo engine ready"}
+          </span>
+          <span className="topbar-divider" />
+          <span className="mono" data-testid="engine-mode">
+            {engineMode === "server" ? "FASTAPI · SQLITE" : "SAFE FALLBACK"}
+          </span>
+        </div>
         <div className="topbar-actions"><span className="phase-pill">PHASE 01</span><button className="icon-button" aria-label="Open notifications">2</button><span className="avatar">ME</span></div>
       </header>
 
@@ -342,7 +351,7 @@ export default function Home() {
             <div className="terminal-tabs">
               <button className={activePanel === "terminal" ? "active" : ""} onClick={() => setActivePanel("terminal")}>Virtual terminal</button>
               <button className={activePanel === "runbook" ? "active" : ""} onClick={() => setActivePanel("runbook")}>Investigation guide</button>
-              <span>{engineMode === "server" ? "persistent shell · API connected" : "mock shell · scenario-aware"}</span>
+              <span data-testid="terminal-mode">{engineMode === "server" ? "persistent shell · API connected" : "mock shell · scenario-aware"}</span>
             </div>
             {activePanel === "terminal" ? (
               <>
@@ -362,7 +371,7 @@ export default function Home() {
           </section>
 
           <aside className="panel coach-panel">
-            <div className="score-ring" style={{ "--score": `${score * 3.6}deg` } as React.CSSProperties}><div><strong>{score}</strong><span>/ 100</span></div></div>
+            <div className="score-ring" style={{ "--score": `${score * 3.6}deg` } as React.CSSProperties}><div><strong data-testid="incident-score">{score}</strong><span>/ 100</span></div></div>
             <div className="coach-title"><span>INCIDENT SCORE</span><h3>{recovered ? "Recovery verified" : "Build your evidence"}</h3></div>
             <div className="checklist">{evidenceItems.map((item) => {
               const complete = evidence.has(item.key);
@@ -380,13 +389,13 @@ export default function Home() {
                 <span className="section-kicker">POST-INCIDENT REVIEW</span>
                 <h2 id="debrief-title">{report ? "Incident report" : "Explain your decisions."}</h2>
               </div>
-              <span className="persistence-badge">
+              <span className="persistence-badge" data-testid="persistence-status">
                 {engineMode === "server" ? "● SAVED TO SQLITE" : "○ DEMO SESSION"}
               </span>
             </div>
             {report ? (
               <div className="report-grid">
-                <div className="report-score"><strong>{report.score}</strong><span>FINAL SCORE</span></div>
+                <div className="report-score"><strong data-testid="final-score">{report.score}</strong><span>FINAL SCORE</span></div>
                 <div className="report-breakdown">
                   <ScoreLine label="Investigation & recovery" value={report.breakdown.investigation_and_recovery} />
                   <ScoreLine label="Root cause" value={report.breakdown.root_cause} />
