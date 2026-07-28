@@ -40,3 +40,7 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+.venv/
+backend/data/
+**/__pycache__/
+.pytest_cache/

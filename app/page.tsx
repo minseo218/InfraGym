@@ -1,9 +1,17 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  advanceSession,
+  completeSession,
+  createSession,
+  executeRemoteCommand,
+  mitigateSession,
+  type Evidence,
+  type IncidentReport,
+} from "../lib/infragym-api";
 
 type Stage = 0 | 1 | 2 | 3 | 4;
-type Evidence = "metrics" | "events" | "logs" | "network";
 
 const stages = [
   { label: "Ready", detail: "Baseline traffic is stable. Launch when you are ready.", time: "19:58:00" },
@@ -100,17 +108,35 @@ export default function Home() {
   const [history, setHistory] = useState([{ command: "scenario status", output: "ticketing-traffic-spike is ready. Type 'help' for available commands." }]);
   const [evidence, setEvidence] = useState<Set<Evidence>>(new Set());
   const [activePanel, setActivePanel] = useState<"terminal" | "runbook">("terminal");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [engineMode, setEngineMode] = useState<"demo" | "connecting" | "server">("demo");
+  const [remoteScore, setRemoteScore] = useState<number | null>(null);
+  const [report, setReport] = useState<IncidentReport | null>(null);
+  const [debrief, setDebrief] = useState({ root_cause: "", mitigation: "", prevention: "" });
+  const [debriefError, setDebriefError] = useState("");
+  const [submittingDebrief, setSubmittingDebrief] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
 
   const metrics = metricSets[stage];
   const recovered = stage === 4;
-  const score = stage === 0 ? 0 : Math.min(100, 12 + evidence.size * 15 + (recovered ? 28 : 0));
+  const localScore = stage === 0 ? 0 : Math.min(60, 12 + evidence.size * 10 + (recovered ? 8 : 0));
+  const score = report?.score ?? remoteScore ?? localScore;
 
   useEffect(() => {
     if (!running || stage === 0 || stage >= 3) return;
-    const timer = window.setTimeout(() => setStage((current) => Math.min(3, current + 1) as Stage), 6200);
+    const timer = window.setTimeout(async () => {
+      if (sessionId) {
+        const remote = await advanceSession(sessionId);
+        if (remote) {
+          setStage(remote.stage);
+          setRemoteScore(remote.score);
+          return;
+        }
+      }
+      setStage((current) => Math.min(3, current + 1) as Stage);
+    }, 6200);
     return () => window.clearTimeout(timer);
-  }, [running, stage]);
+  }, [running, sessionId, stage]);
 
   useEffect(() => {
     terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight, behavior: "smooth" });
@@ -118,10 +144,23 @@ export default function Home() {
 
   const visibleTimeline = useMemo(() => timeline.filter((item) => item.stage <= stage), [stage]);
 
-  function launchIncident() {
+  async function launchIncident() {
+    setEngineMode("connecting");
+    const remote = await createSession();
+    if (remote) {
+      setSessionId(remote.id);
+      setEngineMode("server");
+      setRemoteScore(remote.score);
+    } else {
+      setSessionId(null);
+      setEngineMode("demo");
+      setRemoteScore(null);
+    }
     setStage(1);
     setRunning(true);
     setEvidence(new Set());
+    setReport(null);
+    setDebrief({ root_cause: "", mitigation: "", prevention: "" });
     setHistory([{ command: "scenario start ticketing-traffic-spike", output: "Scenario started. You are the incident commander.\nObjective: restore p95 latency below 500ms without losing confirmed bookings." }]);
   }
 
@@ -129,12 +168,28 @@ export default function Home() {
     setStage(0);
     setRunning(false);
     setEvidence(new Set());
+    setSessionId(null);
+    setRemoteScore(null);
+    setReport(null);
+    setDebrief({ root_cause: "", mitigation: "", prevention: "" });
+    setDebriefError("");
     setHistory([{ command: "scenario status", output: "ticketing-traffic-spike is ready. Type 'help' for available commands." }]);
   }
 
-  function runCommand(rawCommand: string) {
+  async function runCommand(rawCommand: string) {
     const normalized = rawCommand.trim().replace(/\s+/g, " ");
     if (!normalized) return;
+    if (sessionId && engineMode === "server") {
+      const remote = await executeRemoteCommand(sessionId, normalized);
+      if (remote) {
+        setHistory((items) => [...items, { command: remote.command, output: remote.output }]);
+        setEvidence(new Set(remote.evidence));
+        setRemoteScore(remote.score);
+        setCommand("");
+        return;
+      }
+      setEngineMode("demo");
+    }
     const response = commandResponses[normalized] ?? { output: `bash: ${normalized.split(" ")[0]}: command not available in this lab\nTry 'help' to view scenario commands.` };
     setHistory((items) => [...items, { command: normalized, output: response.output }]);
     if (response.evidence) setEvidence((items) => new Set(items).add(response.evidence as Evidence));
@@ -146,14 +201,61 @@ export default function Home() {
     runCommand(command);
   }
 
-  function applyMitigation() {
+  async function applyMitigation() {
     if (evidence.size < 3 || stage < 2) return;
+    if (sessionId && engineMode === "server") {
+      const remote = await mitigateSession(sessionId);
+      if (remote) {
+        setStage(remote.stage);
+        setRemoteScore(remote.score);
+        setRunning(false);
+        setHistory((items) => [...items, {
+          command: "infragym mitigate --cap-retries --scale-api=12",
+          output: remote.output,
+        }]);
+        return;
+      }
+      setEngineMode("demo");
+    }
     setStage(4);
     setRunning(false);
     setHistory((items) => [...items, {
       command: "infragym mitigate --cap-retries --scale-api=12",
       output: "Mitigation accepted.\n✓ Retry budget capped at 2 attempts\n✓ ticketing-api scaled 4 → 12\n✓ DB pool queue draining\nService is recovering. Continue monitoring.",
     }]);
+  }
+
+  async function submitDebrief(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDebriefError("");
+    if (Object.values(debrief).some((value) => value.trim().length < 12)) {
+      setDebriefError("Write at least one clear sentence for each section.");
+      return;
+    }
+    setSubmittingDebrief(true);
+    if (sessionId && engineMode === "server") {
+      const remote = await completeSession(sessionId, debrief);
+      if (remote) {
+        setReport(remote);
+        setRemoteScore(remote.score);
+        setSubmittingDebrief(false);
+        return;
+      }
+      setEngineMode("demo");
+    }
+    const localReport: IncidentReport = {
+      score: Math.min(100, localScore + 20),
+      breakdown: {
+        investigation_and_recovery: localScore,
+        root_cause: 8,
+        mitigation: 6,
+        prevention: 6,
+      },
+      mttr_seconds: 0,
+      summary: "Debrief saved in demo mode. Connect the local API for persistent scoring and MTTR.",
+    };
+    setReport(localReport);
+    setSubmittingDebrief(false);
   }
 
   return (
@@ -163,7 +265,7 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span>InfraGym</span>
         </a>
-        <div className="topbar-center"><span className="status-dot" />Lab environment online<span className="topbar-divider" /><span className="mono">ap-northeast-2</span></div>
+        <div className="topbar-center"><span className="status-dot" />{engineMode === "server" ? "Persistent engine online" : engineMode === "connecting" ? "Connecting scenario engine" : "Demo engine ready"}<span className="topbar-divider" /><span className="mono">{engineMode === "server" ? "FASTAPI · SQLITE" : "SAFE FALLBACK"}</span></div>
         <div className="topbar-actions"><span className="phase-pill">PHASE 01</span><button className="icon-button" aria-label="Open notifications">2</button><span className="avatar">ME</span></div>
       </header>
 
@@ -240,7 +342,7 @@ export default function Home() {
             <div className="terminal-tabs">
               <button className={activePanel === "terminal" ? "active" : ""} onClick={() => setActivePanel("terminal")}>Virtual terminal</button>
               <button className={activePanel === "runbook" ? "active" : ""} onClick={() => setActivePanel("runbook")}>Investigation guide</button>
-              <span>mock shell · scenario-aware</span>
+              <span>{engineMode === "server" ? "persistent shell · API connected" : "mock shell · scenario-aware"}</span>
             </div>
             {activePanel === "terminal" ? (
               <>
@@ -270,6 +372,69 @@ export default function Home() {
             <p className="coach-note">Commands run against a scenario model—never against your Mac or a real cluster.</p>
           </aside>
         </div>
+
+        {recovered && (
+          <section className="debrief-panel" aria-labelledby="debrief-title">
+            <div className="debrief-heading">
+              <div>
+                <span className="section-kicker">POST-INCIDENT REVIEW</span>
+                <h2 id="debrief-title">{report ? "Incident report" : "Explain your decisions."}</h2>
+              </div>
+              <span className="persistence-badge">
+                {engineMode === "server" ? "● SAVED TO SQLITE" : "○ DEMO SESSION"}
+              </span>
+            </div>
+            {report ? (
+              <div className="report-grid">
+                <div className="report-score"><strong>{report.score}</strong><span>FINAL SCORE</span></div>
+                <div className="report-breakdown">
+                  <ScoreLine label="Investigation & recovery" value={report.breakdown.investigation_and_recovery} />
+                  <ScoreLine label="Root cause" value={report.breakdown.root_cause} />
+                  <ScoreLine label="Mitigation" value={report.breakdown.mitigation} />
+                  <ScoreLine label="Prevention" value={report.breakdown.prevention} />
+                </div>
+                <div className="report-summary">
+                  <span>ASSESSMENT</span>
+                  <p>{report.summary}</p>
+                  <small>{report.mttr_seconds ? `MTTR ${Math.floor(report.mttr_seconds / 60)}m ${report.mttr_seconds % 60}s` : "Demo MTTR is not persisted"}</small>
+                </div>
+              </div>
+            ) : (
+              <form className="debrief-form" onSubmit={submitDebrief}>
+                <label>
+                  <span>01 · ROOT CAUSE</span>
+                  <textarea
+                    value={debrief.root_cause}
+                    onChange={(event) => setDebrief((current) => ({ ...current, root_cause: event.target.value }))}
+                    placeholder="What causal chain produced the user impact?"
+                  />
+                </label>
+                <label>
+                  <span>02 · MITIGATION & RECOVERY</span>
+                  <textarea
+                    value={debrief.mitigation}
+                    onChange={(event) => setDebrief((current) => ({ ...current, mitigation: event.target.value }))}
+                    placeholder="Why was your mitigation safe, and how did you verify recovery?"
+                  />
+                </label>
+                <label>
+                  <span>03 · PREVENTION</span>
+                  <textarea
+                    value={debrief.prevention}
+                    onChange={(event) => setDebrief((current) => ({ ...current, prevention: event.target.value }))}
+                    placeholder="Which controls, alerts, or capacity changes prevent recurrence?"
+                  />
+                </label>
+                <div className="debrief-submit">
+                  <p>{debriefError || "Your explanation is scored for causal accuracy and operational judgment."}</p>
+                  <button type="submit" disabled={submittingDebrief}>
+                    {submittingDebrief ? "Evaluating…" : "Complete incident review"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+        )}
       </section>
 
       <section className="next-labs">
@@ -307,4 +472,8 @@ function FlowArrow({ label, hot = false }: { label: string; hot?: boolean }) {
 
 function LabCard({ number, phase, title, tags, current = false }: { number: string; phase: string; title: string; tags: string; current?: boolean }) {
   return <article className={`lab-card ${current ? "current" : ""}`}><span className="lab-number">{number}</span><div><span>{phase}</span><h3>{title}</h3><p>{tags}</p></div><strong>→</strong></article>;
+}
+
+function ScoreLine({ label, value }: { label: string; value: number }) {
+  return <div><span>{label}</span><strong>+{value}</strong></div>;
 }
